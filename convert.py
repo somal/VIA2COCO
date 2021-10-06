@@ -2,7 +2,7 @@ import csv
 import json
 from datetime import datetime
 from os.path import join
-from typing import Tuple
+from typing import Tuple, List
 
 import cv2
 
@@ -22,9 +22,9 @@ def create_image_info(image_id: int, file_name: str, image_size: Tuple[int, int]
     }
 
 
-def create_annotation_info(annotation_id: int, image_id: int, category_id: int, is_crowd: int,
-                           area: float,
-                           bounding_box: Tuple[float, float, float, float], segmentation):
+def create_annotation(annotation_id: int, image_id: int, category_id: int, is_crowd: int,
+                      area: float,
+                      bounding_box: Tuple[float, float, float, float], segmentation):
     return {
         "id": annotation_id,
         "image_id": image_id,
@@ -36,26 +36,8 @@ def create_annotation_info(annotation_id: int, image_id: int, category_id: int, 
     }
 
 
-def convert(image_dir: str, annotation_path: str):
-    """
-    :param str image_dir: directory for your images
-    :param str annotation_path: path for your annotations
-    :return: coco_output is a dictionary of coco style which you could dump it into a json file
-    as for keywords 'info','licenses','categories',you should modify them manually
-    """
-
-    # Get the name(type) and supercategory(super_type) from VIA ANNOTATION
-
-    print('Start to reading')
-    rows = []
-    with open(annotation_path, newline='') as csvfile:
-        annotation_reader = csv.DictReader(csvfile)
-        for row in annotation_reader:
-            rows.append(row)
-    print(rows[0])
-
-    print('Collect all categories')
-    # Collect all categories
+def get_all_categories(rows: list) -> (list, set):
+    print('Collecting all categories...')
     category_names = set([])
     for row in rows:
         region_attributes = row['region_attributes']
@@ -64,8 +46,10 @@ def convert(image_dir: str, annotation_path: str):
             category_names.update([region_attributes['type']])
     coco_categories = [{'id': i + 1, 'name': category, 'supercategory': ''} for i, category in
                        enumerate(category_names)]
+    return coco_categories, category_names
 
-    # Template for output
+
+def create_output_template(coco_categories: list) -> dict:
     coco_output = {
         'info': {
             "description": "Example Dataset",
@@ -85,55 +69,118 @@ def convert(image_dir: str, annotation_path: str):
         'images': [],
         'annotations': []
     }
+    return coco_output
 
-    print('Parsing')
+
+def get_category_id(category: str, categories: List[dict]) -> int:
+    category_id = 0
+    for c in categories:
+        if category == c['name']:
+            category_id = c['id']
+    return category_id
+
+
+def get_area(w: int, h: int) -> int:
+    return w * h
+
+
+def get_bbox(box: dict) -> (int, int, int, int):
+    x, y, w, h = box['x'], box['y'], box['width'], box['height']
+    return x, y, w, h
+
+
+def get_segmentation(box: List[int]):
+    x = box[0]
+    y = box[1]
+    w = box[2]
+    h = box[3]
+    return [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+
+
+def convert(image_dir: str, annotation_path: str):
+    """
+    :param str image_dir: directory for your images
+    :param str annotation_path: path for your annotations
+    :return: coco_output is a dictionary of coco style which you could dump it into a json file
+    as for keywords 'info','licenses','categories',you should modify them manually
+    """
+
+    # Get the name(type) and supercategory(super_type) from VIA ANNOTATION
+
+    print('Reading CSV file...')
+    rows = []
+    with open(annotation_path, newline='') as csvfile:
+        annotation_reader = csv.DictReader(csvfile)
+        for row in annotation_reader:
+            rows.append(row)
+
+    # Collect all categories
+    coco_categories, category_names = get_all_categories(rows)
+    # Template for output
+    coco_output = create_output_template(coco_categories)
+
+    print('Parsing...')
     annotation_id = 0
-    for image_id, row in enumerate(rows):
+    image_id = 0
+    files_passed = set()
+    for row in rows:
         filename = row['filename']
         img = cv2.imread(join(image_dir, filename))
         if img is None:
             continue
-        # make image info and storage it in coco_output['images']
-        image_info = create_image_info(image_id, filename, img.shape[:2])
-        coco_output['images'].append(image_info)
+
+        #
+        if not len(coco_output['images']):
+            # making image info and store it in coco_output['images']
+            image_info = create_image_info(image_id, filename, img.shape[:2])
+            coco_output['images'].append(image_info)
+            files_passed.update([filename])
+
+        if filename not in files_passed:
+            image_id += 1
+            image_info = create_image_info(image_id, filename, img.shape[:2])
+            coco_output['images'].append(image_info)
+            files_passed.update([filename])
 
         region_attributes = row['region_attributes']
         region_attributes = json.loads(region_attributes)
-        if not 'type' in region_attributes:
+        if 'type' not in region_attributes:
             continue
-        category = region_attributes['type']
-        # cate must in categories
-        assert category in category_names
-        # get the cate_id
-        cate_id = 0
-        for category in coco_output['categories']:
-            if category == category['name']:
-                cate_id = category['id']
-        ####################################################################################################
 
+        # Get category_id
+        assert region_attributes['type'] in category_names
+        category_id = get_category_id(region_attributes['type'], coco_output['categories'])
+
+        # Create iscrowd
         iscrowd = 0
-        box_dict = row['region_shape_attributes']
-        box_dict = json.loads(box_dict)
 
-        x, y, w, h = box_dict['x'], box_dict['y'], box_dict['width'], box_dict['height']
-        box = (x, y, w, h)
-        area = w * h
-        segmentation = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
-        ann_info = create_annotation_info(annotation_id, image_id, cate_id, iscrowd, area, box, segmentation)
-        coco_output['annotations'].append(ann_info)
+        # Get bbox
+        box_dict = json.loads(row['region_shape_attributes'])
+        box = get_bbox(box_dict)
+
+        # Combine annotation
+        annotation = create_annotation(annotation_id,
+                                       image_id,
+                                       category_id,
+                                       iscrowd,
+                                       get_area(box[2], box[3]),
+                                       box,
+                                       get_segmentation(box))
+        coco_output['annotations'].append(annotation)
         annotation_id += 1
-    print('Finish')
+    print('Finished!')
 
     return coco_output
 
 
 if __name__ == '__main__':
-    IMG_FOLDER_PATH = '../bd_presales/cable_line/datasets/21'
+    IMG_FOLDER_PATH = r'C:\job\data\KKD\labelled\esaul_21\2'
     ANNOTATIONS_FILE_PATH = join(IMG_FOLDER_PATH, 'lbl', 'via_annotation2.csv')
 
     # Convert VIA annotations to COCO annotations
     annotations = convert(image_dir=IMG_FOLDER_PATH, annotation_path=ANNOTATIONS_FILE_PATH)
 
-    # Save COCO annotations
-    with open(join(IMG_FOLDER_PATH, 'COCO_annotation.json'), 'w', encoding="utf-8") as outfile:
+    # Save COCO annotation
+    with open(join(join(IMG_FOLDER_PATH, 'lbl'), 'COCO_annotation.json'), 'w', encoding="utf-8") as outfile:
         json.dump(annotations, outfile, sort_keys=True, indent=4, ensure_ascii=False)
+    exit(0)
