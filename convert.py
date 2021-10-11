@@ -2,14 +2,26 @@ import csv
 import json
 from datetime import datetime
 from os.path import join
-from typing import Tuple
+from typing import Tuple, List, OrderedDict, Dict, Set, Any
 
 import cv2
 
 
 def create_image_info(image_id: int, file_name: str, image_size: Tuple[int, int],
                       date_captured: datetime = datetime.utcnow().isoformat(' '),
-                      license_id: int = 1, coco_url: str = "", flickr_url: str = ""):
+                      license_id: int = 1, coco_url: str = "", flickr_url: str = "") -> Dict[str, Any]:
+    """
+    Converts input data to COCO image information storing format.
+
+    :param int image_id: unique identificator of the image
+    :param str file_name: name of the image
+    :param Tuple[int, int] image_size: size of the image in format (h, w)
+    :param datetime date_captured: capture date of the image
+    :param int license_id: license identificator
+    :param str coco_url: link to online hosted image
+    :param str flickr_url: link to online hosted image
+    :return: dict of the image information in COCO format
+    """
     return {
         "id": image_id,
         "file_name": file_name,
@@ -22,9 +34,23 @@ def create_image_info(image_id: int, file_name: str, image_size: Tuple[int, int]
     }
 
 
-def create_annotation_info(annotation_id: int, image_id: int, category_id: int, is_crowd: int,
-                           area: float,
-                           bounding_box: Tuple[float, float, float, float], segmentation):
+def create_annotation(annotation_id: int, image_id: int, category_id: int, is_crowd: int, area: int,
+                      bounding_box: Tuple[int, int, int, int], segmentation: List[Tuple[int, int]]) -> dict:
+    """
+    Converts input data to COCO annotation information storing format.
+
+    :param int annotation_id: unique identificator of the annotation
+    :param int image_id: identificator of related image
+    :param int category_id: identificator of related category (annotation class)
+    :param int is_crowd:
+        "iscrowd": 0 if your segmentation based on polygon (object instance)
+        "iscrowd": 1 if your segmentation based uncompressed RLE (crowd)
+    :param float area: area occupied by segmentation in pixels
+    :param Tuple[float, float, float, float] bounding_box:
+        coordinates of bbox in format (x,y,w,h)
+    :param list segmentation: polygon coordinates
+    :return: dict of the annotation information in COCO format
+    """
     return {
         "id": annotation_id,
         "image_id": image_id,
@@ -36,26 +62,14 @@ def create_annotation_info(annotation_id: int, image_id: int, category_id: int, 
     }
 
 
-def convert(image_dir: str, annotation_path: str):
+def get_all_categories(rows: List[OrderedDict[str, str]]) -> (List[Dict[int, Any]], Set[str]):
     """
-    :param str image_dir: directory for your images
-    :param str annotation_path: path for your annotations
-    :return: coco_output is a dictionary of coco style which you could dump it into a json file
-    as for keywords 'info','licenses','categories',you should modify them manually
+    Gets all categories from annotation file.
+    :param list rows: all rows of the annotation file
+    :return: all categories of the annotation file in COCO format (coco_categories)
+    and category_names
     """
-
-    # Get the name(type) and supercategory(super_type) from VIA ANNOTATION
-
-    print('Start to reading')
-    rows = []
-    with open(annotation_path, newline='') as csvfile:
-        annotation_reader = csv.DictReader(csvfile)
-        for row in annotation_reader:
-            rows.append(row)
-    print(rows[0])
-
-    print('Collect all categories')
-    # Collect all categories
+    print('Collecting all categories...')
     category_names = set([])
     for row in rows:
         region_attributes = row['region_attributes']
@@ -65,7 +79,16 @@ def convert(image_dir: str, annotation_path: str):
     coco_categories = [{'id': i + 1, 'name': category, 'supercategory': ''} for i, category in
                        enumerate(category_names)]
 
-    # Template for output
+    return coco_categories, category_names
+
+
+def create_output_template(coco_categories: List[Dict[int, str]]) -> Dict[str, Any]:
+    """
+    Creates template for annotation file in COCO format.
+
+    :param coco_categories: categories to pu into template
+    :return: dict with info, license and categories added
+    """
     coco_output = {
         'info': {
             "description": "Example Dataset",
@@ -85,55 +108,142 @@ def convert(image_dir: str, annotation_path: str):
         'images': [],
         'annotations': []
     }
+    return coco_output
 
-    print('Parsing')
+
+def get_category_id(category: str, categories: List[Dict[int, str]]) -> int:
+    """
+    Gets identificator for category given.
+
+    :param category: category to find id
+    :param categories: all categories
+    :return: identificator of category
+    """
+    category_id = 0
+    for c in categories:
+        if category == c['name']:
+            category_id = c['id']
+    return category_id
+
+
+def get_area(w: int, h: int) -> int:
+    """
+    Calculates area occupied by bbox in pixels.
+
+    :param w: width of bbox
+    :param h: height of bbox
+    :return: area of bbox
+    """
+    return w * h
+
+
+def get_bbox(box: Dict[str, Any]) -> (int, int, int, int):
+    """
+    Extracts bbox coordinates in format (x, y, w, h).
+
+    :param box: bbox information
+    :return: bbox coordinates
+    """
+    x, y, w, h = box['x'], box['y'], box['width'], box['height']
+    return x, y, w, h
+
+
+def get_segmentation(box: Tuple[int]):
+    """
+    Calculates segmentation polygon
+    from bbox coordinates.
+
+    :param box: bbox information
+    :return: tuple of points of calculated polygon
+    """
+    x = box[0]
+    y = box[1]
+    w = box[2]
+    h = box[3]
+    return [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+
+
+def convert(image_dir: str, annotation_path: str):
+    """
+    Converts annotation from VIA format (.csv) to COCO format (.json).
+
+    :param str image_dir: directory for your images
+    :param str annotation_path: path for your annotation file
+    :return: coco_output is a dictionary of COCO style which you could dump it into a json file
+    as for keywords 'info','licenses','categories',you should modify them manually
+    """
+
+    print('Reading CSV file...')
+    rows = []
+    with open(annotation_path, newline='') as csvfile:
+        annotation_reader = csv.DictReader(csvfile)
+        for row in annotation_reader:
+            rows.append(row)
+
+    # Collect all categories
+    coco_categories, category_names = get_all_categories(rows)
+    # Create template for output
+    coco_output = create_output_template(coco_categories)
+
+    print('Parsing...')
     annotation_id = 0
-    for image_id, row in enumerate(rows):
+    image_id = 0
+    files_passed = set()
+    for row in rows:
         filename = row['filename']
         img = cv2.imread(join(image_dir, filename))
         if img is None:
             continue
-        # make image info and storage it in coco_output['images']
-        image_info = create_image_info(image_id, filename, img.shape[:2])
-        coco_output['images'].append(image_info)
 
-        region_attributes = row['region_attributes']
-        region_attributes = json.loads(region_attributes)
-        if not 'type' in region_attributes:
+        # Create and add image info into coco_output
+        if filename not in files_passed:
+            if len(coco_output['images']):
+                image_id += 1
+            image_info = create_image_info(image_id, filename, img.shape[:2])
+            coco_output['images'].append(image_info)
+            files_passed.update([filename])
+
+        # Get category_id
+        region_attributes = json.loads(row['region_attributes'])
+        if 'type' not in region_attributes:
             continue
-        category = region_attributes['type']
-        # cate must in categories
-        assert category in category_names
-        # get the cate_id
-        cate_id = 0
-        for category in coco_output['categories']:
-            if category == category['name']:
-                cate_id = category['id']
-        ####################################################################################################
+        assert region_attributes['type'] in category_names
+        category_id = get_category_id(region_attributes['type'], coco_output['categories'])
 
-        iscrowd = 0
-        box_dict = row['region_shape_attributes']
-        box_dict = json.loads(box_dict)
+        # Create iscrowd field
+        is_crowd = 0
 
-        x, y, w, h = box_dict['x'], box_dict['y'], box_dict['width'], box_dict['height']
-        box = (x, y, w, h)
-        area = w * h
-        segmentation = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
-        ann_info = create_annotation_info(annotation_id, image_id, cate_id, iscrowd, area, box, segmentation)
-        coco_output['annotations'].append(ann_info)
+        # Get bbox
+        box_dict = json.loads(row['region_shape_attributes'])
+        x, y, w, h = get_bbox(box_dict)
+
+        # Combine annotation
+        annotation = create_annotation(annotation_id=annotation_id,
+                                       image_id=image_id,
+                                       category_id=category_id,
+                                       is_crowd=is_crowd,
+                                       area=get_area(w, h),
+                                       bounding_box=(x, y, w, h),
+                                       segmentation=get_segmentation((x, y, w, h)))
+
+        # Add annotation info into coco_output
+        coco_output['annotations'].append(annotation)
         annotation_id += 1
-    print('Finish')
+    print('Converting finished.')
 
     return coco_output
 
 
 if __name__ == '__main__':
-    IMG_FOLDER_PATH = '../bd_presales/cable_line/datasets/21'
+    IMG_FOLDER_PATH = r'C:\job\data\KKD\labelled\rcocs-1_12\3'
     ANNOTATIONS_FILE_PATH = join(IMG_FOLDER_PATH, 'lbl', 'via_annotation2.csv')
 
     # Convert VIA annotations to COCO annotations
     annotations = convert(image_dir=IMG_FOLDER_PATH, annotation_path=ANNOTATIONS_FILE_PATH)
 
-    # Save COCO annotations
-    with open(join(IMG_FOLDER_PATH, 'COCO_annotation.json'), 'w', encoding="utf-8") as outfile:
+    print('Saving COCO annotation into JSON file...')
+    with open(join(join(IMG_FOLDER_PATH, 'lbl'), 'COCO_annotation.json'), 'w', encoding="utf-8") as outfile:
         json.dump(annotations, outfile, sort_keys=True, indent=4, ensure_ascii=False)
+
+    print("Finished!")
+    exit(0)
